@@ -473,14 +473,17 @@ def task_result(task_id):
 
     while True:
         if not outputs:
-            time.sleep(0.1)
+            # Throttle check/updates
+            time.sleep(0.5) # FIXME make this a setting
             continue
 
         matches = [res for res in outputs if res[0] == task_id] 
 
         if matches:
-            id, flag, product = matches.pop(0)
-            outputs.remove([id, flag, product])
+            flag = "preview"
+            while len(matches) and flag == "preview": # If we have a bunch of replies, skip the previews
+                id, flag, product = matches.pop(0)
+                outputs.remove([id, flag, product])
             break
 
     return (flag, product)
