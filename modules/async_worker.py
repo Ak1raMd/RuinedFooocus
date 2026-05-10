@@ -474,7 +474,7 @@ def task_result(task_id):
     while True:
         if not outputs:
             # Throttle check/updates
-            time.sleep(0.5) # FIXME make this a setting
+            time.sleep(settings.default_settings.get("update_interval", 0.1))
             continue
 
         matches = [res for res in outputs if res[0] == task_id] 
