@@ -1,4 +1,4 @@
-### development
+### 26.05.12
 * [HiDreamO1](https://huggingface.co/Comfy-Org/HiDream-O1-Image) support
 
 ### 26.04.29
