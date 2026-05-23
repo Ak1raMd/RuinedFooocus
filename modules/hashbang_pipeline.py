@@ -171,20 +171,20 @@ class pipeline:
                 repo = pygit2.Repository(".")
                 print(f"#!: Switching to branch {data}. Please restart.")
                 try:
-                    remote = repo.remotes['origin']
-                    remote.fetch()
+                    remote_ref = f"origin/{data}"
+                    remote_branch = repo.lookup_branch(remote_ref,pygit2.GIT_BRANCH_REMOTE)
+                    local_branch = repo.lookup_branch(data)
 
-                    remote_branch_name = f"origin/{data}"
-                    remote_ref = repo.lookup_reference(remote_branch_name)
-                    remote_commit = remote_ref.target
+                    if local_branch is None:
+                        commit = repo.get(remote_branch.target)
+                        local_branch = repo.create_branch(data, commit)
+                        local_branch.upstream = remote_branch
 
-                    local_branch_name = f"{data}"
-                    if local_branch_name not in repo.branches.local:
-                        repo.create_reference(f"refs/heads/{local_branch_name}", remote_commit)
-
-                    local_branch = repo.lookup_branch(local_branch_name)
-                    repo.checkout(local_branch)
+                    repo.set_head(local_branch.name)
+                    repo.checkout_head()
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     print(f"ERROR: {e}")
 
             case _:
