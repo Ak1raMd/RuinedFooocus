@@ -121,7 +121,7 @@ class pipeline:
             "clip_llama": "llama_q2.gguf",
             "clip_ministral3": "ministral-3-3b.safetensors",
             "clip_mistral3": "mistral_3_small_flux2_fp8.safetensors",
-            "clip_qwen25": "qwen_2.5_vl_7b_edit-q2_k.gguf",
+            "clip_qwen25": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
             "clip_qwen3_4b": "Qwen3-4B-Q4_K_M.gguf",
             "clip_qwen3_8b": "Qwen3-8B-Q8_0.gguf",
             "clip_qwen3_06b": "qwen_3_06b_base.safetensors",
