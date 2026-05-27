@@ -226,7 +226,7 @@ class pipeline:
             "latent": "HiDreamO1",
             "clip_type": comfy.sd.CLIPType.HIDREAM, #FIXME
             "clip_names": [], #FIXME
-            "vae_name": None,
+            "vae_name": "pixel_space",
             "options": {"ModelNoiseScale": 8.0, "HiDreamO1SeamSmoothing": True}
         },
         "Lumina2": {
@@ -255,7 +255,7 @@ class pipeline:
             "latent": "ChromaRadience",
             "clip_type": comfy.sd.CLIPType.PIXELDIT,
             "clip_names": [get_clip_name("clip_gemma")],
-            "vae_name": None,
+            "vae_name": "pixel_space",
         },
         "QwenImage": {
             "latent": "SD3",
@@ -444,7 +444,10 @@ class pipeline:
                             clip_loader.load_data(clip_paths)
                         )
 
-                    if model_info['vae_name'] is not None:
+                    if model_info['vae_name'] == "pixel_space":
+                        sd = {}
+                        sd["pixel_space_vae"] = torch.tensor(1.0)
+                    else:
                         vae_path = path_manager.get_folder_file_path(
                             "vae",
                             model_info['vae_name'],
@@ -455,9 +458,7 @@ class pipeline:
                             sd = load_gguf_sd(str(vae_path))
                         else:
                             sd = comfy.utils.load_torch_file(str(vae_path))
-                        vae = comfy.sd.VAE(sd=sd)
-                    else:
-                        vae = None
+                    vae = comfy.sd.VAE(sd=sd)
 
                     clip_vision = None
                 except Exception as e:
@@ -977,16 +978,13 @@ class pipeline:
                 (-1, f"VAE decoding ...", None)
             )
 
-        if self.xl_base_patched.vae is None:
-            images = [previewer.preview(samples, 0, 0)]
-        else:
-            decoded_latent = VAEDecode().decode(
-                samples=sampled_latent, vae=self.xl_base_patched.vae
-            )[0]
-            images = [
-                np.clip(255.0 * y.cpu().numpy(), 0, 255).astype(np.uint8)
-                for y in decoded_latent
-            ]
+        decoded_latent = VAEDecode().decode(
+            samples=sampled_latent, vae=self.xl_base_patched.vae
+        )[0]
+        images = [
+            np.clip(255.0 * y.cpu().numpy(), 0, 255).astype(np.uint8)
+            for y in decoded_latent
+        ]
 
         shared.shared_cache["prev_image"] = images[0]
         if callback is not None:
