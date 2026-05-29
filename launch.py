@@ -119,34 +119,35 @@ def prepare_environment(offline=False):
         os.environ["FLASH_ATTENTION_SKIP_CUDA_BUILD"] = "TRUE"
 
         # Run torchruntime install
-        cmds = torchruntime.installer.get_install_commands(torch_platform, [])
-        if REINSTALL_ALL or REINSTALL_TORCH:
-            for idx in range(len(cmds)):
-                cmds[idx].insert(0, "--force-reinstall")
-        cmds = torchruntime.installer.get_pip_commands(cmds)
-        torchruntime.installer.run_commands(cmds)
-        torchruntime.configure()
+        if not os.path.exists("freezetorch"):
+            cmds = torchruntime.installer.get_install_commands(torch_platform, [])
+            if REINSTALL_ALL or REINSTALL_TORCH:
+                for idx in range(len(cmds)):
+                    cmds[idx].insert(0, "--force-reinstall")
+            cmds = torchruntime.installer.get_pip_commands(cmds)
+            torchruntime.installer.run_commands(cmds)
+            torchruntime.configure()
 
-        if REINSTALL_ALL or not requirements_met(modules_file):
-            print("This next step may take a while")
-            run_pip(f'install -r "{modules_file}"', "required modules")
+            if REINSTALL_ALL or not requirements_met(modules_file):
+                print("This next step may take a while")
+                run_pip(f'install -r "{modules_file}"', "required modules")
 
-        try:
-            xlc_version = "xllamacpp==0.2.7"
-            if REINSTALL_ALL or not is_installed(xlc_version):
-                platform_index = {
-                    'cu124': 'https://xorbitsai.github.io/xllamacpp/whl/cu124',
-                    'cu128': 'https://xorbitsai.github.io/xllamacpp/whl/cu128',
-                    'rocm6.3': 'https://xorbitsai.github.io/xllamacpp/whl/rocm-6.3.4',
-                    'rocm6.4': 'https://xorbitsai.github.io/xllamacpp/whl/rocm-6.4.1',
-                    'cpu': 'https://pypi.org/simple'
-                }
-                if torch_platform not in platform_index:
-                    torch_platform = 'cpu'
-                run_pip(f'install {xlc_version} --index-url {platform_index[torch_platform]}', "XLlamacpp")
-        except Exception as e:
-            print("WARNING: Failed to install/update llm modules.")
-            print(e)
+            try:
+                xlc_version = "xllamacpp==0.2.7"
+                if REINSTALL_ALL or not is_installed(xlc_version):
+                    platform_index = {
+                        'cu124': 'https://xorbitsai.github.io/xllamacpp/whl/cu124',
+                        'cu128': 'https://xorbitsai.github.io/xllamacpp/whl/cu128',
+                        'rocm6.3': 'https://xorbitsai.github.io/xllamacpp/whl/rocm-6.3.4',
+                        'rocm6.4': 'https://xorbitsai.github.io/xllamacpp/whl/rocm-6.4.1',
+                        'cpu': 'https://pypi.org/simple'
+                    }
+                    if torch_platform not in platform_index:
+                        torch_platform = 'cpu'
+                    run_pip(f'install {xlc_version} --index-url {platform_index[torch_platform]}', "XLlamacpp")
+            except Exception as e:
+                print("WARNING: Failed to install/update llm modules.")
+                print(e)
 
 def clone_git_repos(offline=False):
     from modules.launch_util import git_clone
