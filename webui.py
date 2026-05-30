@@ -592,7 +592,10 @@ with shared.gradio_root as block:
                         ]
                         return gr.update(choices=choices, value=perf_name)
                     else:
-                        return gr.update(value=None)
+                        selection = settings.get("performance") # Stupid workaround, we need the Dropdown to chang
+                        if perf_selection == selection: # ...so we pick the option that isn't currently selected
+                            selection = None
+                        return gr.update(value=selection)
 
                 with gr.Group():
                     aspect_ratios_selection = gr.Dropdown(
