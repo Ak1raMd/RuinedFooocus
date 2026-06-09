@@ -128,6 +128,7 @@ class pipeline:
             "clip_qwen3_4b": "Qwen3-4B-Q4_K_M.gguf",
             "clip_qwen3_8b": "Qwen3-8B-Q8_0.gguf",
             "clip_qwen3_06b": "qwen_3_06b_base.safetensors",
+            "clip_qwen3vl_8b": "Qwen3-VL-8B-Instruct-Q5_K_M.gguf",
             "clip_oldt5": "t5xxl_old_fp32-q4_0.gguf",
             "clip_t5": "t5-v1_1-xxl-encoder-Q3_K_S.gguf",
         }
@@ -224,10 +225,16 @@ class pipeline:
         },
         "HiDreamO1": {
             "latent": "HiDreamO1",
-            "clip_type": comfy.sd.CLIPType.HIDREAM, #FIXME
-            "clip_names": [], #FIXME
+            "clip_type": comfy.sd.CLIPType.HIDREAM,
+            "clip_names": [],
             "vae_name": "pixel_space",
             "options": {"ModelNoiseScale": 8.0, "HiDreamO1SeamSmoothing": True}
+        },
+        "Ideogram4": {
+            "latent": "FLUX2",
+            "clip_type": comfy.sd.CLIPType.IDEOGRAM4,
+            "clip_names": [get_clip_name("clip_qwen3vl_8b")],
+            "vae_name": get_vae_name("vae_flux2")
         },
         "Lumina2": {
             "latent": "SD3",
@@ -727,7 +734,7 @@ class pipeline:
             if self.textencode("-", negative_prompt, clip_skip):
                 updated_conditions = True
 
-            if "[" in positive_prompt and "]" in positive_prompt:
+            if "[" in positive_prompt and "]" in positive_prompt and not positive_prompt.strip().startswith("{"):
                 if controlnet is not None and input_image is not None:
                     print("ControlNet and [prompt|switching] do not work well together.")
                     print("ControlNet will only be applied to the first prompt.")
