@@ -89,6 +89,11 @@
         "path": "path_clip",
         "filename": "Qwen3-VL-8B-Instruct-Q5_K_M.gguf"
     },
+    "clip/Qwen3VL-8B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf": {
+        "url": "https://huggingface.co/HauhauCS/Qwen3VL-8B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3VL-8B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf",
+        "path": "path_clip",
+        "filename": "Qwen3VL-8B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf"
+    },
     "clip/jina_clip_v2_bf16.safetensors": {
         "url": "https://huggingface.co/woctordho/comfyui-jina-clip-v2/resolve/main/jina_clip_v2_bf16.safetensors",
         "path": "path_clip",
