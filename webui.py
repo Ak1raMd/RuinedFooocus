@@ -392,7 +392,6 @@ with shared.gradio_root as block:
                                 placeholder=t("Type prompt here."),
                                 container=False,
                                 autofocus=True,
-                                elem_classes="type_row",
                                 lines=5,
                                 value=settings["prompt"],
                                 scale=5,
