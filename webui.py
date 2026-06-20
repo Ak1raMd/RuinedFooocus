@@ -1472,4 +1472,4 @@ launch_app(args)
 
 # Wait...
 while True:
-    time.sleep(100)
+    time.sleep(100) # Waiting to exit
