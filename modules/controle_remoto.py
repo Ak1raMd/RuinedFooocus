@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTex
 import shared
 from shared import settings, path_manager
 import modules.async_worker as worker
+import ctypes
 
 PRESETS_FILE = Path(__file__).parent.parent / "settings" / "cr_presets.json"
 
@@ -128,9 +129,11 @@ def _opcoes():
 
 # ── geracao ─────────────────────────────────────────────────────────────────────
 _current_task_id = None
+_generating = False
+_gen_start_image = None
 
 def _submeter(payload):
-    global _current_task_id
+    global _current_task_id, _generating, _gen_start_image
     d = settings.default_settings
     loras_in = payload.get("loras") or []
     loras = []
@@ -155,6 +158,8 @@ def _submeter(payload):
         "image_number": int(payload.get("image_number", 1) or 1),
     }
     _current_task_id = worker.add_task(tmp.copy())
+    _generating = True
+    _gen_start_image = shared.state.get("last_image") if isinstance(shared.state, dict) else None
     return _current_task_id
 
 
@@ -228,7 +233,9 @@ async def _ep_gerar(request: Request):
 
 
 async def _ep_parar(request: Request):
+    global _generating
     worker.interrupt_ruined_processing = True
+    _generating = False
     return JSONResponse({"ok": True})
 
 
@@ -267,6 +274,31 @@ async def _ep_thumb(request: Request):
     return PlainTextResponse("sem thumb", status_code=404)
 
 
+async def _ep_fullscreen_post(request: Request):
+    try:
+        user32 = ctypes.windll.user32
+        VK_F11 = 0x7A
+        user32.keybd_event(VK_F11, 0, 0, 0)
+        user32.keybd_event(VK_F11, 0, 0x0002, 0)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "erro": str(e)})
+
+
+async def _ep_progress(request: Request):
+    global _generating
+    if not isinstance(shared.state, dict):
+        return JSONResponse({"gerando": False, "step": 0, "total": 0, "pct": 0})
+    count = shared.state.get("preview_count", 0) or 0
+    total = shared.state.get("preview_total", 0) or 0
+    pct = int(100 * count / total) if total > 0 else 0
+    if _generating:
+        cur = shared.state.get("last_image")
+        if cur and cur != _gen_start_image:
+            _generating = False
+    return JSONResponse({"gerando": _generating, "step": count, "total": total, "pct": pct})
+
+
 def montar(app):
     """Registra as rotas no FastAPI do Gradio. Chamado pelo webui.py apos o launch."""
     from fastapi.routing import APIRoute
@@ -284,7 +316,8 @@ def montar(app):
         ("/cr/preview_img", _ep_preview_img, ["GET"]),
         ("/cr/imagem", _ep_imagem, ["GET"]),
         ("/cr/thumb/{tipo}/{nome:path}", _ep_thumb, ["GET"]),
-
+        ("/cr/fullscreen", _ep_fullscreen_post, ["POST"]),
+        ("/cr/progress", _ep_progress, ["GET"]),
     ]
     for path, ep, methods in rotas:
         app.router.routes.insert(0, APIRoute(path, ep, methods=methods))
@@ -386,7 +419,10 @@ textarea{min-height:80px;resize:vertical}
 </style>
 </head>
 <body>
-<h1>Ruined<span>Fooocus</span> — Controle</h1>
+<div style="display:flex;align-items:center;gap:10px">
+<h1 style="flex:1">Ruined<span>Fooocus</span> — Controle</h1>
+<button onclick="fetch('/cr/fullscreen',{method:'POST'})" style="padding:8px 14px;border:1.5px solid #2a2a3a;border-radius:10px;background:#1a1a24;color:#9ca3af;font-size:12px;cursor:pointer;white-space:nowrap;flex-shrink:0">⛶ Fullscreen TV</button>
+</div>
 <div class="hint">Escreva e ajuste tudo por aqui. A imagem aparece na TV/PC.<br>
 No navegador do PC, abra: <b>localhost:7860/tela</b></div>
 
@@ -722,9 +758,11 @@ html,body{height:100%;background:#000;overflow:hidden}
   background:#222;color:#888;border:1px solid #333;border-radius:10px;padding:12px 24px;
   font-family:-apple-system,sans-serif;font-size:14px;cursor:pointer;letter-spacing:1px;
   transition:opacity .5s" onclick="goFS()">⛶ clique para tela cheia</div>
+<div id="prog" style="position:fixed;bottom:0;left:0;right:0;height:4px;background:#111;display:none;z-index:5"><div id="progBar" style="height:100%;background:#a78bfa;width:0;transition:width .3s"></div></div>
+<div id="progText" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#666;font-family:-apple-system,sans-serif;font-size:14px;display:none;z-index:5;letter-spacing:1px"></div>
 <script>
 const img=document.getElementById('img'),ph=document.getElementById('ph'),dot=document.getElementById('dot');
-let lastFinalId=null,lastPreviewId=null;
+let lastFinalId=null,lastPreviewId=null,genDone=false;
 
 function goFS(){
   const el=document.documentElement;
@@ -736,20 +774,23 @@ function goFS(){
 
 async function tick(){
   try{
-    const [uf,up]=await Promise.all([
+    const [uf,up,pg]=await Promise.all([
       fetch('/cr/ultima',{cache:'no-store'}).then(r=>r.json()),
-      fetch('/cr/preview',{cache:'no-store'}).then(r=>r.json())
+      fetch('/cr/preview',{cache:'no-store'}).then(r=>r.json()),
+      fetch('/cr/progress',{cache:'no-store'}).then(r=>r.json())
     ]);
-    // final image has priority
+    if(pg.gerando)genDone=false;
+    const prg=document.getElementById('prog'),pbar=document.getElementById('progBar'),ptxt=document.getElementById('progText');
+    if(pg.gerando&&pg.total>0){prg.style.display='block';pbar.style.width=pg.pct+'%';ptxt.style.display='block';ptxt.textContent=pg.step+'/'+pg.total+' — '+pg.pct+'%';}
+    else{prg.style.display='none';ptxt.style.display='none';}
     if(uf.tem&&uf.id!==lastFinalId){
-      lastFinalId=uf.id;lastPreviewId=null;
+      lastFinalId=uf.id;lastPreviewId=up.id;genDone=true;
       const novo=new Image();
       novo.onload=()=>{img.src=novo.src;img.style.display='block';ph.style.display='none';};
       novo.src='/cr/imagem?t='+encodeURIComponent(uf.id);
       dot.className='live';setTimeout(()=>{dot.className='';},600);
     }
-    // during generation show preview
-    else if(up.tem&&up.id!==lastPreviewId){
+    else if(!genDone&&up.tem&&up.id!==lastPreviewId){
       lastPreviewId=up.id;
       const novo=new Image();
       novo.onload=()=>{img.src=novo.src;img.style.display='block';ph.style.display='none';};
