@@ -232,6 +232,20 @@ async def _ep_parar(request: Request):
     return JSONResponse({"ok": True})
 
 
+_fullscreen_flag = False
+
+async def _ep_fullscreen_get(request: Request):
+    global _fullscreen_flag
+    triggered = _fullscreen_flag
+    _fullscreen_flag = False
+    return JSONResponse({"fullscreen": triggered})
+
+async def _ep_fullscreen_post(request: Request):
+    global _fullscreen_flag
+    _fullscreen_flag = True
+    return JSONResponse({"ok": True})
+
+
 async def _ep_ultima(request: Request):
     return JSONResponse(_ultima())
 
@@ -284,6 +298,8 @@ def montar(app):
         ("/cr/preview_img", _ep_preview_img, ["GET"]),
         ("/cr/imagem", _ep_imagem, ["GET"]),
         ("/cr/thumb/{tipo}/{nome:path}", _ep_thumb, ["GET"]),
+        ("/cr/fullscreen", _ep_fullscreen_get, ["GET"]),
+        ("/cr/fullscreen", _ep_fullscreen_post, ["POST"]),
     ]
     for path, ep, methods in rotas:
         app.router.routes.insert(0, APIRoute(path, ep, methods=methods))
@@ -387,7 +403,10 @@ a.tv{color:#a78bfa;font-size:13px;text-decoration:none;border:1px solid #a78bfa;
 </style>
 </head>
 <body>
+<div style="display:flex;align-items:center;justify-content:space-between">
 <h1>Ruined<span>Fooocus</span> — Controle</h1>
+<button onclick="fetch('/cr/fullscreen',{method:'POST'})" style="background:none;border:1px solid #333;color:#666;border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer">⛶ Fullscreen TV</button>
+</div>
 <div class="hint">Escreva e ajuste tudo por aqui. A imagem aparece na TV/PC:
 <a class="tv" href="/tela" target="_blank">abrir tela cheia no PC →</a></div>
 
@@ -719,9 +738,33 @@ html,body{height:100%;background:#000;overflow:hidden}
   <div id="ph">aguardando imagem…</div>
 </div>
 <div id="dot" title="atualizando"></div>
+<div id="fsOverlay" style="position:fixed;inset:0;background:#000c;display:flex;align-items:center;justify-content:center;z-index:10;cursor:pointer" onclick="goFS()">
+  <div style="color:#555;font-size:16px;font-family:-apple-system,sans-serif;text-align:center;letter-spacing:1px">toque para entrar em tela cheia</div>
+</div>
 <script>
 const img=document.getElementById('img'),ph=document.getElementById('ph'),dot=document.getElementById('dot');
-let lastFinalId=null,lastPreviewId=null;
+let lastFinalId=null,lastPreviewId=null,userClicked=false;
+
+function goFS(){
+  userClicked=true;
+  document.getElementById('fsOverlay').style.display='none';
+  const el=document.documentElement;
+  if(el.requestFullscreen)el.requestFullscreen();
+  else if(el.webkitRequestFullscreen)el.webkitRequestFullscreen();
+}
+
+setInterval(async()=>{
+  try{
+    const r=await fetch('/cr/fullscreen',{cache:'no-store'}).then(r=>r.json());
+    if(r.fullscreen&&userClicked){
+      const el=document.documentElement;
+      if(!document.fullscreenElement){
+        if(el.requestFullscreen)el.requestFullscreen();
+        else if(el.webkitRequestFullscreen)el.webkitRequestFullscreen();
+      }
+    }
+  }catch{}
+},2000);
 
 async function tick(){
   try{
