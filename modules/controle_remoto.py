@@ -25,10 +25,8 @@ import shared
 from shared import settings, path_manager
 import modules.async_worker as worker
 
-# arquivo de presets (do nosso lado, nao mexe nos "presets" nativos do Fooocus)
 PRESETS_FILE = Path(__file__).parent.parent / "settings" / "cr_presets.json"
 
-# preset negativo semente pedido pelo Atila
 PRESET_NEG_SEED = ("((simple background)), ((static background)), sketch, drawing, grayscale, "
                    "monochrome, unpainted, artist name, gay, lesbian, futanari.")
 
@@ -53,11 +51,10 @@ def _save_presets(p):
     PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = PRESETS_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(PRESETS_FILE)   # escrita atomica write-then-rename (evita arquivo corrompido)
+    tmp.replace(PRESETS_FILE)
 
 
 def _ensure_seed():
-    # cria o arquivo com o preset semente no primeiro uso
     if not PRESETS_FILE.exists():
         _save_presets(_presets_default())
 
@@ -78,6 +75,18 @@ def _listar(folder_key):
     return nomes
 
 
+def _find_thumbnail(cache_subdir, model_name):
+    cache_base = path_manager.model_paths.get("cache_path")
+    if not cache_base:
+        return None
+    base = Path(cache_base) / cache_subdir / Path(model_name).name
+    for ext in (".jpeg", ".jpg", ".png", ".gif"):
+        candidate = base.with_suffix(ext)
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _opcoes():
     try:
         checkpoints = _listar("modelfile_path")
@@ -92,11 +101,31 @@ def _opcoes():
         estilos = list(_st.keys()) if isinstance(_st, dict) else list(_st)
     except Exception:
         estilos = []
+
+    perf_names = list(shared.performance_settings.performance_options.keys())
+    res_map = shared.resolution_settings.aspect_ratios
+    resolutions = list(res_map.keys())
+
+    ckpt_thumbs = {}
+    for c in checkpoints:
+        t = _find_thumbnail("checkpoints", c)
+        if t:
+            ckpt_thumbs[c] = True
+    lora_thumbs = {}
+    for l in loras:
+        t = _find_thumbnail("loras", l)
+        if t:
+            lora_thumbs[l] = True
+
     d = settings.default_settings
     return {
         "checkpoints": checkpoints,
         "loras": loras,
         "estilos": estilos,
+        "performances": perf_names,
+        "resolutions": resolutions,
+        "ckpt_thumbs": ckpt_thumbs,
+        "lora_thumbs": lora_thumbs,
         "default": {
             "checkpoint": d.get("base_model"),
             "performance": d.get("performance"),
@@ -163,7 +192,6 @@ async def _ep_presets_get(request: Request):
 
 
 async def _ep_presets_post(request: Request):
-    # body: {"tipo":"positivos"|"negativos","acao":"add"|"del","nome":...,"texto":...}
     try:
         b = await request.json()
         tipo = b.get("tipo")
@@ -176,7 +204,7 @@ async def _ep_presets_post(request: Request):
         else:
             nome = (b.get("nome") or "").strip() or "Sem nome"
             texto = b.get("texto") or ""
-            lista[:] = [x for x in lista if x.get("nome") != nome]  # substitui se mesmo nome
+            lista[:] = [x for x in lista if x.get("nome") != nome]
             lista.append({"nome": nome, "texto": texto})
         _save_presets(p)
         return JSONResponse({"ok": True, "presets": p})
@@ -204,6 +232,18 @@ async def _ep_imagem(request: Request):
     return PlainTextResponse("sem imagem ainda", status_code=404)
 
 
+async def _ep_thumb(request: Request):
+    tipo = request.path_params.get("tipo", "")
+    nome = request.path_params.get("nome", "")
+    subdir = {"ckpt": "checkpoints", "lora": "loras"}.get(tipo)
+    if not subdir:
+        return PlainTextResponse("tipo invalido", status_code=400)
+    path = _find_thumbnail(subdir, nome)
+    if path and Path(path).exists():
+        return FileResponse(path)
+    return PlainTextResponse("sem thumb", status_code=404)
+
+
 def montar(app):
     """Registra as rotas no FastAPI do Gradio. Chamado pelo webui.py apos o launch."""
     from fastapi.routing import APIRoute
@@ -217,8 +257,8 @@ def montar(app):
         ("/cr/gerar", _ep_gerar, ["POST"]),
         ("/cr/ultima", _ep_ultima, ["GET"]),
         ("/cr/imagem", _ep_imagem, ["GET"]),
+        ("/cr/thumb/{tipo}/{nome:path}", _ep_thumb, ["GET"]),
     ]
-    # insere na FRENTE pra ter precedencia sobre qualquer catch-all do Gradio
     for path, ep, methods in rotas:
         app.router.routes.insert(0, APIRoute(path, ep, methods=methods))
     print("[controle_remoto] rotas montadas: /controle (celular) e /tela (TV)")
@@ -251,19 +291,6 @@ textarea{min-height:80px;resize:vertical}
 .preset-row select{flex:1}
 .mini{padding:10px 12px;font-size:13px;border:none;border-radius:10px;background:#252533;color:#cbd5e1;cursor:pointer}
 .mini:active{opacity:.7}
-.lora{display:flex;gap:8px;margin-bottom:8px}
-.lora select{flex:1}
-.lora input{width:78px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.bar{position:fixed;left:0;right:0;bottom:0;background:#13131aee;backdrop-filter:blur(8px);
-  padding:14px;border-top:1px solid #2a2a3a;display:flex;gap:10px;align-items:center;max-width:560px;margin:0 auto}
-.gerar{flex:1;padding:18px;border:none;border-radius:14px;background:#a78bfa;color:#0f0f13;
-  font-size:17px;font-weight:700;cursor:pointer}
-.gerar:active{opacity:.8}.gerar:disabled{opacity:.4}
-.st{font-size:12px;color:#9ca3af;min-width:96px;text-align:right}
-a.tv{color:#a78bfa;font-size:13px;text-decoration:none;border:1px solid #a78bfa;border-radius:8px;padding:8px 10px;display:inline-block;margin-top:8px}
-details{margin-top:14px;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px}
-summary{font-size:13px;color:#9ca3af;cursor:pointer}
 </style>
 </head>
 <body>
@@ -288,7 +315,7 @@ summary{font-size:13px;color:#9ca3af;cursor:pointer}
 </div>
 
 <label>Checkpoint (modelo)</label>
-<select id="checkpoint"></select>
+<div class="model-pick" id="ckptWrap"></div>
 
 <details>
 <summary>LoRAs (opcional)</summary>
@@ -300,8 +327,8 @@ summary{font-size:13px;color:#9ca3af;cursor:pointer}
 <label>Estilos</label>
 <select id="style" multiple size="4"></select>
 <div class="grid2">
-  <div><label>Resolucao</label><input type="text" id="resolution"></div>
-  <div><label>Performance</label><input type="text" id="performance"></div>
+  <div><label>Resolucao</label><select id="resolution"></select></div>
+  <div><label>Performance</label><select id="performance"></select></div>
 </div>
 <div class="grid2">
   <div><label>Nº de imagens</label><input type="number" id="image_number" value="1" min="1" max="32"></div>
@@ -313,27 +340,92 @@ summary{font-size:13px;color:#9ca3af;cursor:pointer}
   <button class="gerar" id="bGerar" onclick="gerar()">Gerar</button>
   <div class="st" id="st"></div>
 </div>
+<style>
+.model-pick{display:flex;flex-direction:column;gap:6px}
+.model-card{display:flex;align-items:center;gap:10px;background:#1a1a24;border:1.5px solid #2a2a3a;
+  border-radius:10px;padding:8px 12px;cursor:pointer;transition:border-color .15s}
+.model-card.sel{border-color:#a78bfa;background:#1f1a2e}
+.model-card img{width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#252533}
+.model-card .name{font-size:13px;line-height:1.3;word-break:break-word;flex:1}
+.model-card .noimg{width:48px;height:48px;border-radius:6px;background:#252533;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:20px;color:#444}
+.lora{display:flex;gap:8px;margin-bottom:8px;align-items:center}
+.lora .lpick{flex:1;display:flex;align-items:center;gap:6px;background:#1a1a24;border:1.5px solid #2a2a3a;
+  border-radius:10px;padding:6px 10px;overflow:hidden}
+.lora .lpick img{width:36px;height:36px;border-radius:5px;object-fit:cover;flex-shrink:0}
+.lora .lpick select{flex:1;background:transparent;color:#e8e8e8;border:none;font-size:13px;outline:none}
+.lora input{width:68px;background:#1a1a24;color:#e8e8e8;border:1.5px solid #2a2a3a;border-radius:10px;
+  padding:8px;font-size:14px;text-align:center}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.bar{position:fixed;left:0;right:0;bottom:0;background:#13131aee;backdrop-filter:blur(8px);
+  padding:14px;border-top:1px solid #2a2a3a;display:flex;gap:10px;align-items:center;max-width:560px;margin:0 auto}
+.gerar{flex:1;padding:18px;border:none;border-radius:14px;background:#a78bfa;color:#0f0f13;
+  font-size:17px;font-weight:700;cursor:pointer}
+.gerar:active{opacity:.8}.gerar:disabled{opacity:.4}
+.st{font-size:12px;color:#9ca3af;min-width:96px;text-align:right}
+a.tv{color:#a78bfa;font-size:13px;text-decoration:none;border:1px solid #a78bfa;border-radius:8px;padding:8px 10px;display:inline-block;margin-top:8px}
+details{margin-top:14px;border:1px solid #2a2a3a;border-radius:10px;padding:10px 12px}
+summary{font-size:13px;color:#9ca3af;cursor:pointer}
+</style>
 <script>
 const $=id=>document.getElementById(id);
 let PRESETS={positivos:[],negativos:[]};
 let lastId=null, watching=false;
+let selectedCkpt='';
 
 function opt(v,sel){const o=document.createElement('option');o.value=v;o.textContent=v;if(sel)o.selected=true;return o;}
 
-async function init(){
-  const o=await fetch('/cr/opcoes').then(r=>r.json());
-  o.checkpoints.forEach(c=>$('checkpoint').appendChild(opt(c,c===o.default.checkpoint)));
-  const lc=$('loras');
+function thumbUrl(tipo,nome){return '/cr/thumb/'+tipo+'/'+encodeURIComponent(nome);}
+
+function buildCkptCards(checkpoints, thumbs, defaultCkpt){
+  const wrap=$('ckptWrap');wrap.innerHTML='';
+  selectedCkpt=defaultCkpt||checkpoints[0]||'';
+  checkpoints.forEach(c=>{
+    const card=document.createElement('div');card.className='model-card'+(c===selectedCkpt?' sel':'');
+    card.dataset.val=c;
+    if(thumbs[c]){
+      const img=document.createElement('img');img.src=thumbUrl('ckpt',c);img.loading='lazy';card.appendChild(img);
+    } else {
+      const ph=document.createElement('div');ph.className='noimg';ph.textContent='🎨';card.appendChild(ph);
+    }
+    const nm=document.createElement('div');nm.className='name';
+    nm.textContent=c.replace(/\.safetensors$/i,'').replace(/_/g,' ');
+    card.appendChild(nm);
+    card.onclick=()=>{
+      wrap.querySelectorAll('.model-card').forEach(x=>x.classList.remove('sel'));
+      card.classList.add('sel');selectedCkpt=c;
+    };
+    wrap.appendChild(card);
+  });
+}
+
+function buildLoraSlots(loras, thumbs){
+  const lc=$('loras');lc.innerHTML='';
   for(let i=0;i<5;i++){
     const div=document.createElement('div');div.className='lora';
+    const pick=document.createElement('div');pick.className='lpick';
+    const img=document.createElement('img');img.style.display='none';img.dataset.idx=i;pick.appendChild(img);
     const s=document.createElement('select');s.appendChild(opt('None',true));
-    o.loras.forEach(l=>s.appendChild(opt(l,false)));s.dataset.lora=i;
+    loras.forEach(l=>s.appendChild(opt(l,false)));
+    s.dataset.lora=i;
+    s.onchange=function(){
+      const v=this.value;
+      if(v!=='None'&&thumbs[v]){img.src=thumbUrl('lora',v);img.style.display='block';}
+      else{img.style.display='none';}
+    };
+    pick.appendChild(s);div.appendChild(pick);
     const w=document.createElement('input');w.type='number';w.step='0.1';w.value='1';w.dataset.w=i;
-    div.appendChild(s);div.appendChild(w);lc.appendChild(div);
+    div.appendChild(w);lc.appendChild(div);
   }
+}
+
+async function init(){
+  const o=await fetch('/cr/opcoes').then(r=>r.json());
+  buildCkptCards(o.checkpoints, o.ckpt_thumbs||{}, o.default.checkpoint);
+  buildLoraSlots(o.loras, o.lora_thumbs||{});
   (o.estilos||[]).forEach(e=>$('style').appendChild(opt(e,false)));
-  if(o.default.resolution)$('resolution').value=o.default.resolution;
-  if(o.default.performance)$('performance').value=o.default.performance;
+  (o.performances||[]).forEach(p=>$('performance').appendChild(opt(p,p===o.default.performance)));
+  (o.resolutions||[]).forEach(r=>$('resolution').appendChild(opt(r,r===o.default.resolution)));
   await carregarPresets();
   const u=await fetch('/cr/ultima').then(r=>r.json());lastId=u.tem?u.id:null;
 }
@@ -372,7 +464,7 @@ async function gerar(){
   const styleSel=[...$('style').selectedOptions].map(o=>o.value);
   const payload={
     prompt:$('prompt').value,negative:$('negative').value,
-    checkpoint:$('checkpoint').value,loras:coletarLoras(),
+    checkpoint:selectedCkpt,loras:coletarLoras(),
     style: styleSel.length?styleSel:null,
     resolution:$('resolution').value||null,performance:$('performance').value||null,
     image_number:parseInt($('image_number').value)||1,seed:parseInt($('seed').value)||-1
@@ -392,7 +484,6 @@ function watchNova(){
         $('bGerar').disabled=false;watching=false;clearInterval(iv);}
     }catch{}
   },1500);
-  // libera o botao depois de no max 5min mesmo sem deteccao
   setTimeout(()=>{$('bGerar').disabled=false;watching=false;clearInterval(iv);},300000);
 }
 init();
@@ -440,7 +531,6 @@ async function tick(){
   }catch(e){}
 }
 setInterval(tick,1500);tick();
-// mantem a tela acordada se o browser suportar
 if('wakeLock'in navigator){const req=()=>navigator.wakeLock.request('screen').catch(()=>{});req();
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')req();});}
 </script>
