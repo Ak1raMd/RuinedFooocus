@@ -172,6 +172,14 @@ def launch_app(args):
         prevent_thread_lock=True,
     )
 
+    # add-on Atila: controle remoto split (/controle no celular, /tela na TV).
+    # Isolado e defensivo — se falhar, NAO derruba o Fooocus.
+    try:
+        import modules.controle_remoto as _cr
+        _cr.montar(shared.server_app)
+    except Exception as _e:
+        print(f"[controle_remoto] nao montou (Fooocus segue normal): {_e}")
+
 def update_clicked():
     return {
         run_button: gr.update(interactive=False, visible='hidden'),
