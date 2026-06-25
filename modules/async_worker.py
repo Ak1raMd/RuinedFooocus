@@ -446,7 +446,19 @@ def worker():
         time.sleep(0.01)
         if len(buffer) > 0:
             task = buffer.pop(0)
-            handler(task)
+            try:
+                handler(task)
+            except Exception:
+                # Uma task malformada NUNCA pode matar o worker. Se a thread morre, a GUI
+                # inteira congela esperando task_result() e exige restart do Fooocus. Entao:
+                # loga o traceback, devolve resultado vazio pra desbloquear quem espera, segue vivo.
+                # (add-on Atila/Claude - fix de robustez do worker, 25/06/2026)
+                print(f"ERROR: task {task.get('task_id')} falhou no worker:")
+                traceback.print_exc()
+                try:
+                    outputs.append([task.get("task_id"), "results", []])
+                except Exception:
+                    pass
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

@@ -16,6 +16,40 @@ import shared
 from shared import settings, path_manager
 import modules.async_worker as worker
 import ctypes
+import sys
+import logging
+import traceback
+from collections import deque
+
+# ── logging do controle remoto: arquivo + buffer em memoria + terminal do Fooocus ──
+_CR_LOG_FILE = Path(__file__).parent.parent.parent / "controle_remoto.log"
+_log_buffer = deque(maxlen=400)
+
+class _BufHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            _log_buffer.append(self.format(record))
+        except Exception:
+            pass
+
+_cr_log = logging.getLogger("controle_remoto")
+if not _cr_log.handlers:
+    _cr_log.setLevel(logging.INFO)
+    _fmt = logging.Formatter("%(asctime)s [CR] %(message)s", "%H:%M:%S")
+    try:
+        _fh = logging.FileHandler(str(_CR_LOG_FILE), encoding="utf-8")
+        _fh.setFormatter(_fmt)
+        _cr_log.addHandler(_fh)
+    except Exception:
+        pass
+    _bh = _BufHandler()
+    _bh.setFormatter(_fmt)
+    _cr_log.addHandler(_bh)
+    _sh = logging.StreamHandler(sys.stdout)
+    _sh.setFormatter(_fmt)
+    _cr_log.addHandler(_sh)
+    _cr_log.propagate = False
+    _cr_log.info("logging do controle remoto iniciado -> %s" % _CR_LOG_FILE)
 
 PRESETS_FILE = Path(__file__).parent.parent / "settings" / "cr_presets.json"
 
@@ -135,31 +169,89 @@ _gen_start_image = None
 def _submeter(payload):
     global _current_task_id, _generating, _gen_start_image
     d = settings.default_settings
+
+    # ── loras: shape exigida pelo worker -> ("", "PESO - NOME"); PESO tem que ser float-avel
     loras_in = payload.get("loras") or []
     loras = []
     for i in range(5):
         item = loras_in[i] if i < len(loras_in) else {}
         m = (item or {}).get("model") or d.get(f"lora_{i+1}_model", "None")
         w = (item or {}).get("weight", d.get(f"lora_{i+1}_weight", 1.0))
+        try:
+            w = float(w)
+        except Exception:
+            w = 1.0
         loras.append(("", f"{w} - {m}"))
+
+    # ── performance: TEM que ser um nome real; senao o worker le custom_steps e crasha
+    perf = payload.get("performance") or "SD3"
+    try:
+        perf_ok = list(shared.performance_settings.performance_options.keys())
+        if perf_ok and perf not in perf_ok:
+            _cr_log.warning("performance %r invalida -> fallback %s", perf, perf_ok[0])
+            perf = perf_ok[0]
+    except Exception:
+        pass
+
+    # ── resolucao: TEM que ser um label real de aspect_ratios; senao KeyError no worker
+    res = payload.get("resolution") or d.get("resolution")
+    try:
+        res_ok = list(shared.resolution_settings.aspect_ratios.keys())
+        if res_ok and res not in res_ok:
+            _cr_log.warning("resolucao %r invalida -> fallback %s", res, res_ok[0])
+            res = res_ok[0]
+    except Exception:
+        pass
+
+    # ── style_selection: SEMPRE lista (uma string crasharia em style.copy())
+    style = payload.get("style")
+    if style is None:
+        style = []
+    elif isinstance(style, str):
+        style = [style] if style else []
+    elif not isinstance(style, list):
+        style = list(style)
+
+    n = int(payload.get("image_number", 1) or 1)
+    if n < 1:
+        n = 1
 
     tmp = {
         "task_type": "process",
         "prompt": payload.get("prompt", "") or "",
         "negative": payload.get("negative", "") or "",
         "loras": loras,
-        "style_selection": payload.get("style") if payload.get("style") is not None else d["style"],
+        "style_selection": style,
         "seed": int(payload.get("seed", -1) or -1),
         "base_model_name": payload.get("checkpoint") or d["base_model"],
-        "performance_selection": payload.get("performance") or "SD3",
-        "aspect_ratios_selection": payload.get("resolution") or d["resolution"],
+        "performance_selection": perf,
+        "custom_steps": int(payload.get("custom_steps", 30) or 30),
+        "custom_width": int(d.get("custom_width", 1024) or 1024),
+        "custom_height": int(d.get("custom_height", 1024) or 1024),
+        "aspect_ratios_selection": res,
         "cn_selection": None,
         "cn_type": None,
-        "image_number": int(payload.get("image_number", 1) or 1),
+        "input_image": None,
+        "generate_forever": False,
+        "image_number": n,
+        "image_total": n,
     }
+    # limpar flags de interrupcao ANTES de submeter — a GUI faz isso a cada run; o add-on nao
+    # fazia, entao uma geracao parada/falhada deixava a flag setada e a PROXIMA abortava no step 0
+    # (= "ficou tudo quebrado, precisei reiniciar"). (add-on Atila/Claude, 25/06/2026)
+    try:
+        worker.interrupt_ruined_processing = False
+        if isinstance(shared.state, dict):
+            shared.state["interrupted"] = False
+    except Exception:
+        pass
+
     _current_task_id = worker.add_task(tmp.copy())
     _generating = True
     _gen_start_image = shared.state.get("last_image") if isinstance(shared.state, dict) else None
+    _cr_log.info("task %s submetida: ckpt=%s perf=%s res=%s n=%s seed=%s loras=%s",
+                 _current_task_id, tmp["base_model_name"], perf, res, n, tmp["seed"],
+                 [x[1] for x in loras if not x[1].endswith("- None")] or "nenhuma")
     return _current_task_id
 
 
@@ -229,6 +321,7 @@ async def _ep_gerar(request: Request):
         task_id = _submeter(b)
         return JSONResponse({"ok": True, "task_id": str(task_id)})
     except Exception as e:
+        _cr_log.exception("ERRO em /cr/gerar")
         return JSONResponse({"ok": False, "erro": str(e)}, status_code=500)
 
 
@@ -299,6 +392,10 @@ async def _ep_progress(request: Request):
     return JSONResponse({"gerando": _generating, "step": count, "total": total, "pct": pct})
 
 
+async def _ep_logs(request: Request):
+    return PlainTextResponse("\n".join(_log_buffer) or "(sem logs ainda)")
+
+
 def montar(app):
     """Registra as rotas no FastAPI do Gradio. Chamado pelo webui.py apos o launch."""
     from fastapi.routing import APIRoute
@@ -318,6 +415,7 @@ def montar(app):
         ("/cr/thumb/{tipo}/{nome:path}", _ep_thumb, ["GET"]),
         ("/cr/fullscreen", _ep_fullscreen_post, ["POST"]),
         ("/cr/progress", _ep_progress, ["GET"]),
+        ("/cr/logs", _ep_logs, ["GET"]),
     ]
     for path, ep, methods in rotas:
         app.router.routes.insert(0, APIRoute(path, ep, methods=methods))
@@ -645,10 +743,17 @@ async function init(){
   buildPerfCards(o.performances,o.default.performance);
   (o.estilos||[]).forEach(e=>$('style').appendChild(opt(e,false)));
   await carregarPresets();
-  // apply first negative preset by default
+  // apply first negative preset by default (primeiro uso ja vem com ele)
   const negs=PRESETS.negativos||[];
   if(negs.length){$('negative').value=negs[0].texto;$('presetNeg').value=negs[0].nome;}
+  // restaurar estado salvo (sobrescreve defaults) — pagina sobrevive a reload do Chrome
+  restoreState();
   const u=await fetch('/cr/ultima').then(r=>r.json());lastId=u.tem?u.id:null;
+  // auto-salvar: debounce ao digitar, imediato ao sair (visibility/pagehide)
+  document.addEventListener('input',saveStateSoon);
+  document.addEventListener('change',saveStateSoon);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveState();});
+  window.addEventListener('pagehide',saveState);
 }
 
 async function carregarPresets(){
@@ -673,6 +778,47 @@ async function salvar(tipo,campo){
   await carregarPresets();setSt('preset salvo');
 }
 function setSt(m){$('st').textContent=m;}
+
+/* ── persistencia de estado (localStorage) — sobrevive a Chrome descartar a aba ── */
+const SKEY='cr_controle_state_v1';
+let _saveT=null;
+function saveStateSoon(){clearTimeout(_saveT);_saveT=setTimeout(saveState,300);}
+function saveState(){
+  try{
+    const loras=[];document.querySelectorAll('.lora-slot').forEach(s=>{
+      loras.push({model:s.querySelector('.lpick').dataset.val||'None',weight:s.querySelector('input').value});});
+    localStorage.setItem(SKEY,JSON.stringify({
+      prompt:$('prompt').value,negative:$('negative').value,
+      ckpt:selectedCkpt,res:selectedRes,perf:selectedPerf,loras,
+      styles:[...$('style').selectedOptions].map(o=>o.value),
+      seed:$('seed').value,image_number:$('image_number').value,
+      presetPos:$('presetPos').value,presetNeg:$('presetNeg').value
+    }));
+  }catch(e){}
+}
+function restoreState(){
+  let st;try{st=JSON.parse(localStorage.getItem(SKEY));}catch(e){}
+  if(!st)return;
+  if(st.prompt!=null)$('prompt').value=st.prompt;
+  if(st.negative!=null)$('negative').value=st.negative;
+  if(st.seed!=null)$('seed').value=st.seed;
+  if(st.image_number!=null)$('image_number').value=st.image_number;
+  if(st.ckpt){selectedCkpt=st.ckpt;
+    document.querySelectorAll('#ckptBody .model-card').forEach(c=>c.classList.toggle('sel',c.dataset.val===st.ckpt));
+    updateCkptHead();}
+  if(st.res){selectedRes=st.res;
+    document.querySelectorAll('#resBody .res-card').forEach(c=>c.classList.toggle('sel',c.dataset.val===st.res));
+    $('resVal').textContent=st.res;}
+  if(st.perf){selectedPerf=st.perf;
+    document.querySelectorAll('#perfBody .perf-card').forEach(c=>c.classList.toggle('sel',c.dataset.val===st.perf));
+    $('perfVal').textContent=st.perf;}
+  if(Array.isArray(st.loras)){const slots=document.querySelectorAll('.lora-slot');
+    st.loras.forEach((l,i)=>{if(i<slots.length){selectLora(i,l.model||'None');
+      if(l.weight!=null)slots[i].querySelector('input').value=l.weight;}});}
+  if(Array.isArray(st.styles))[...$('style').options].forEach(o=>{o.selected=st.styles.includes(o.value);});
+  if(st.presetPos!=null)$('presetPos').value=st.presetPos;
+  if(st.presetNeg!=null)$('presetNeg').value=st.presetNeg;
+}
 
 function coletarLoras(){
   const out=[];document.querySelectorAll('.lora-slot').forEach(slot=>{
