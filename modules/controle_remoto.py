@@ -17,6 +17,8 @@ from shared import settings, path_manager
 import modules.async_worker as worker
 import ctypes
 import sys
+import os
+import subprocess
 import logging
 import traceback
 from collections import deque
@@ -161,6 +163,40 @@ def _opcoes():
     }
 
 
+# ── abrir /tela no monitor do PC (uma vez por sessao) ───────────────────────────
+_tela_pc_aberta = False
+_BROWSERS_PC = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+]
+
+def _abrir_tela_pc():
+    """Abre /tela em tela cheia no monitor do PC. O Fooocus sobe com --nobrowser,
+    entao nada aparece sozinho; ao gerar pelo celular, a imagem passa a aparecer no
+    PC automaticamente. So abre uma vez por sessao (flag _tela_pc_aberta)."""
+    global _tela_pc_aberta
+    if _tela_pc_aberta:
+        return
+    url = "http://127.0.0.1:7860/tela"
+    profile = r"C:\AI\RuinedFooocus\_tela_profile"
+    for b in _BROWSERS_PC:
+        if os.path.exists(b):
+            try:
+                subprocess.Popen([
+                    b, f"--user-data-dir={profile}",
+                    "--no-first-run", "--no-default-browser-check",
+                    "--new-window", "--start-fullscreen", f"--app={url}",
+                ])
+                _tela_pc_aberta = True
+                _cr_log.info("/tela aberta no monitor do PC (%s)", os.path.basename(b))
+                return
+            except Exception as e:
+                _cr_log.warning("falha ao abrir /tela no PC via %s: %s", b, e)
+    _cr_log.warning("nenhum navegador encontrado pra abrir /tela no PC")
+
+
 # ── geracao ─────────────────────────────────────────────────────────────────────
 _current_task_id = None
 _generating = False
@@ -246,9 +282,13 @@ def _submeter(payload):
     except Exception:
         pass
 
+    if isinstance(shared.state, dict):
+        shared.state["cr_step"] = 0
+        shared.state["cr_total_steps"] = 0
     _current_task_id = worker.add_task(tmp.copy())
     _generating = True
     _gen_start_image = shared.state.get("last_image") if isinstance(shared.state, dict) else None
+    _abrir_tela_pc()  # garante a visualizacao no monitor do PC (1x por sessao)
     _cr_log.info("task %s submetida: ckpt=%s perf=%s res=%s n=%s seed=%s loras=%s",
                  _current_task_id, tmp["base_model_name"], perf, res, n, tmp["seed"],
                  [x[1] for x in loras if not x[1].endswith("- None")] or "nenhuma")
@@ -279,11 +319,11 @@ def _preview_info():
 
 # ── endpoints HTTP ──────────────────────────────────────────────────────────────
 async def _ep_controle(request: Request):
-    return HTMLResponse(HTML_CONTROLE)
+    return HTMLResponse(HTML_CONTROLE, headers={"Cache-Control": "no-cache"})
 
 
 async def _ep_tela(request: Request):
-    return HTMLResponse(HTML_TELA)
+    return HTMLResponse(HTML_TELA, headers={"Cache-Control": "no-cache"})
 
 
 async def _ep_opcoes(request: Request):
@@ -382,14 +422,19 @@ async def _ep_progress(request: Request):
     global _generating
     if not isinstance(shared.state, dict):
         return JSONResponse({"gerando": False, "step": 0, "total": 0, "pct": 0})
-    count = shared.state.get("preview_count", 0) or 0
-    total = shared.state.get("preview_total", 0) or 0
-    pct = int(100 * count / total) if total > 0 else 0
+    # a geracao terminou? (imagem nova apareceu desde que comecamos)
     if _generating:
         cur = shared.state.get("last_image")
         if cur and cur != _gen_start_image:
             _generating = False
-    return JSONResponse({"gerando": _generating, "step": count, "total": total, "pct": pct})
+    if _generating:
+        step = int(shared.state.get("cr_step", 0) or 0)
+        total = int(shared.state.get("cr_total_steps", 0) or 0)
+        pct = int(100 * step / total) if total > 0 else 0
+        if pct > 99:
+            pct = 99  # 100% so quando a imagem final aparecer de fato
+        return JSONResponse({"gerando": True, "step": step, "total": total, "pct": pct})
+    return JSONResponse({"gerando": False, "step": 0, "total": 0, "pct": 0})
 
 
 async def _ep_logs(request: Request):
@@ -598,6 +643,7 @@ No navegador do PC, abra: <b>localhost:7860/tela</b></div>
   <div class="lpicker-box" id="loraPickerBox"></div>
 </div>
 
+<div id="cprog" style="position:fixed;left:50%;transform:translateX(-50%);bottom:80px;width:calc(100% - 28px);max-width:532px;height:8px;background:#1a1a24;border-radius:4px;overflow:hidden;display:none;z-index:60"><div id="cprogBar" style="height:100%;width:0;background:linear-gradient(90deg,#a78bfa,#22c55e);transition:width .25s"></div></div>
 <div class="bar">
   <button class="gerar" id="bGerar" onclick="gerar()">Gerar</button>
   <button class="parar" id="bParar" onclick="parar()">Parar</button>
@@ -849,14 +895,32 @@ async function gerar(){
     const r=await fetch('/cr/gerar',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(payload)}).then(r=>r.json());
     if(!r.ok){setSt('erro: '+(r.erro||'?'));generating=false;showBtn('gerar');return;}
-    setSt('gerando... veja na TV');watchNova();
+    setSt('gerando...');watchNova();pollProgress();
   }catch(e){setSt('erro de conexao');generating=false;showBtn('gerar');}
+}
+
+let progTimer=null;
+function pollProgress(){
+  clearInterval(progTimer);
+  $('cprog').style.display='block';$('cprogBar').style.width='0%';
+  progTimer=setInterval(async()=>{
+    try{
+      const p=await fetch('/cr/progress',{cache:'no-store'}).then(r=>r.json());
+      if(p.gerando){if(p.total>0){$('cprogBar').style.width=p.pct+'%';setSt('step '+p.step+'/'+p.total);}}
+      else{stopProgress(true);}
+    }catch(e){}
+  },600);
+}
+function stopProgress(done){
+  clearInterval(progTimer);progTimer=null;
+  if(done)$('cprogBar').style.width='100%';
+  setTimeout(()=>{$('cprog').style.display='none';$('cprogBar').style.width='0%';},700);
 }
 
 async function parar(){
   setSt('parando...');
   try{await fetch('/cr/parar',{method:'POST'});}catch{}
-  wasStopped=true;generating=false;showBtn('regen');setSt('parado');
+  wasStopped=true;generating=false;showBtn('regen');setSt('parado');stopProgress(false);
 }
 
 function watchNova(){

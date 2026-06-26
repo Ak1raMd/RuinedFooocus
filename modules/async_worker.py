@@ -164,6 +164,12 @@ def _process(gen_data):
             return
 
         done_steps = i * steps + step
+        # progresso por STEP pro controle remoto (barra no celular/TV) - add-on Atila/Claude
+        try:
+            shared.state["cr_step"] = done_steps
+            shared.state["cr_total_steps"] = all_steps
+        except Exception:
+            pass
         try:
             status
         except NameError:
