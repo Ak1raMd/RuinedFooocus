@@ -202,6 +202,14 @@ _current_task_id = None
 _generating = False
 _gen_start_image = None
 
+# ultima atividade REAL (gerar/parar/heartbeat do /controle). O launcher le isso em
+# /cr/idle pra auto-desligar o Fooocus apos N min sem uso. A /tela (TV) NAO marca
+# atividade de proposito — se so a TV ficar aberta, o Fooocus ainda desliga.
+_last_activity = time.time()
+def _marcar_atividade():
+    global _last_activity
+    _last_activity = time.time()
+
 def _submeter(payload):
     global _current_task_id, _generating, _gen_start_image
     d = settings.default_settings
@@ -287,6 +295,7 @@ def _submeter(payload):
         shared.state["cr_total_steps"] = 0
     _current_task_id = worker.add_task(tmp.copy())
     _generating = True
+    _marcar_atividade()
     _gen_start_image = shared.state.get("last_image") if isinstance(shared.state, dict) else None
     _abrir_tela_pc()  # garante a visualizacao no monitor do PC (1x por sessao)
     _cr_log.info("task %s submetida: ckpt=%s perf=%s res=%s n=%s seed=%s loras=%s",
@@ -369,6 +378,7 @@ async def _ep_parar(request: Request):
     global _generating
     worker.interrupt_ruined_processing = True
     _generating = False
+    _marcar_atividade()
     return JSONResponse({"ok": True})
 
 
@@ -427,6 +437,7 @@ async def _ep_progress(request: Request):
         cur = shared.state.get("last_image")
         if cur and cur != _gen_start_image:
             _generating = False
+            _marcar_atividade()  # geracao concluida = atividade (reinicia janela de inatividade)
     if _generating:
         step = int(shared.state.get("cr_step", 0) or 0)
         total = int(shared.state.get("cr_total_steps", 0) or 0)
@@ -435,6 +446,24 @@ async def _ep_progress(request: Request):
             pct = 99  # 100% so quando a imagem final aparecer de fato
         return JSONResponse({"gerando": True, "step": step, "total": total, "pct": pct})
     return JSONResponse({"gerando": False, "step": 0, "total": 0, "pct": 0})
+
+
+async def _ep_heartbeat(request: Request):
+    # o /controle (celular) bate aqui de tempos em tempos enquanto aberto -> mantem
+    # o Fooocus vivo. Quando a aba e descartada/fechada, para de bater -> inatividade.
+    _marcar_atividade()
+    return JSONResponse({"ok": True})
+
+
+async def _ep_idle(request: Request):
+    global _generating
+    ger = bool(_generating)
+    if ger and isinstance(shared.state, dict):
+        cur = shared.state.get("last_image")
+        if cur and cur != _gen_start_image:
+            ger = False
+    idle = max(0, int(time.time() - _last_activity))
+    return JSONResponse({"idle": idle, "gerando": ger})
 
 
 async def _ep_logs(request: Request):
@@ -460,6 +489,8 @@ def montar(app):
         ("/cr/thumb/{tipo}/{nome:path}", _ep_thumb, ["GET"]),
         ("/cr/fullscreen", _ep_fullscreen_post, ["POST"]),
         ("/cr/progress", _ep_progress, ["GET"]),
+        ("/cr/heartbeat", _ep_heartbeat, ["POST"]),
+        ("/cr/idle", _ep_idle, ["GET"]),
         ("/cr/logs", _ep_logs, ["GET"]),
     ]
     for path, ep, methods in rotas:
@@ -795,12 +826,28 @@ async function init(){
   // restaurar estado salvo (sobrescreve defaults) — pagina sobrevive a reload do Chrome
   restoreState();
   const u=await fetch('/cr/ultima').then(r=>r.json());lastId=u.tem?u.id:null;
+  // reconciliar com o estado REAL do servidor ao (re)abrir a pagina: se uma geracao
+  // esta MESMO em curso, religa a UI; senao garante o botao Gerar. Sem isso, voltar
+  // pra aba podia mostrar "carregando" eterno (loading falso).
+  try{
+    const pg=await fetch('/cr/progress',{cache:'no-store'}).then(r=>r.json());
+    if(pg.gerando){generating=true;showBtn('parar');setSt('gerando...');watchNova();pollProgress();}
+    else{generating=false;showBtn('gerar');setSt('');}
+  }catch(e){showBtn('gerar');}
   // auto-salvar: debounce ao digitar, imediato ao sair (visibility/pagehide)
   document.addEventListener('input',saveStateSoon);
   document.addEventListener('change',saveStateSoon);
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')saveState();});
   window.addEventListener('pagehide',saveState);
+  // heartbeat: enquanto este /controle estiver aberto, o Fooocus nao se auto-desliga
+  // por inatividade. Para de bater quando a aba e escondida/descartada/fechada.
+  _hb();setInterval(_hb,30000);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')_hb();});
+  // impede sair por engano: o "voltar" do celular fechava o Chrome e resetava tudo.
+  // beforeunload faz o navegador pedir confirmacao ("Sair do site?") antes de fechar.
+  window.addEventListener('beforeunload',e=>{e.preventDefault();e.returnValue='';});
 }
+function _hb(){fetch('/cr/heartbeat',{method:'POST'}).catch(()=>{});}
 
 async function carregarPresets(){
   PRESETS=await fetch('/cr/presets').then(r=>r.json());
@@ -899,14 +946,24 @@ async function gerar(){
   }catch(e){setSt('erro de conexao');generating=false;showBtn('gerar');}
 }
 
-let progTimer=null;
+let progTimer=null,_lastStep=-1,_lastStepT=0;
 function pollProgress(){
   clearInterval(progTimer);
   $('cprog').style.display='block';$('cprogBar').style.width='0%';
+  _lastStep=-1;_lastStepT=Date.now();
   progTimer=setInterval(async()=>{
     try{
       const p=await fetch('/cr/progress',{cache:'no-store'}).then(r=>r.json());
-      if(p.gerando){if(p.total>0){$('cprogBar').style.width=p.pct+'%';setSt('step '+p.step+'/'+p.total);}}
+      if(p.gerando){
+        if(p.step!==_lastStep){_lastStep=p.step;_lastStepT=Date.now();}
+        if(p.total>0){$('cprogBar').style.width=p.pct+'%';setSt('step '+p.step+'/'+p.total);}
+        // sem avancar por 90s = travou. Feedback honesto: corta o loading falso e
+        // oferece Regenerar em vez de spinner eterno.
+        if(Date.now()-_lastStepT>90000){
+          stopProgress(false);generating=false;watching=false;showBtn('regen');
+          setSt('⚠️ travou? toque Regenerar');
+        }
+      }
       else{stopProgress(true);}
     }catch(e){}
   },600);
@@ -964,23 +1021,11 @@ html,body{height:100%;background:#000;overflow:hidden}
   <div id="ph">aguardando imagem…</div>
 </div>
 <div id="dot" title="atualizando"></div>
-<div id="fsBtn" style="position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:10;
-  background:#222;color:#888;border:1px solid #333;border-radius:10px;padding:12px 24px;
-  font-family:-apple-system,sans-serif;font-size:14px;cursor:pointer;letter-spacing:1px;
-  transition:opacity .5s" onclick="goFS()">⛶ clique para tela cheia</div>
 <div id="prog" style="position:fixed;bottom:0;left:0;right:0;height:4px;background:#111;display:none;z-index:5"><div id="progBar" style="height:100%;background:#a78bfa;width:0;transition:width .3s"></div></div>
 <div id="progText" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);color:#666;font-family:-apple-system,sans-serif;font-size:14px;display:none;z-index:5;letter-spacing:1px"></div>
 <script>
 const img=document.getElementById('img'),ph=document.getElementById('ph'),dot=document.getElementById('dot');
 let lastFinalId=null,lastPreviewId=null,genDone=false;
-
-function goFS(){
-  const el=document.documentElement;
-  if(el.requestFullscreen)el.requestFullscreen();
-  else if(el.webkitRequestFullscreen)el.webkitRequestFullscreen();
-  document.getElementById('fsBtn').style.opacity='0';
-  setTimeout(()=>{document.getElementById('fsBtn').style.display='none';},600);
-}
 
 async function tick(){
   try{

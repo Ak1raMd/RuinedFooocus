@@ -170,6 +170,9 @@ def stop_fooocus():
     except Exception as e:
         log.error(f'Erro ao matar processo: {e}')
 
+    # fecha a janela aberta sobre a /tela — não deixa a TV órfã em "aguardando imagem"
+    fechar_tela_no_pc()
+
     def _watch_stop():
         global _stopping
         deadline = time.time() + 30
@@ -233,6 +236,54 @@ def abrir_tela_no_pc():
     except Exception as e:
         log.error(f'Não consegui abrir a tela no PC: {e}')
         return False
+
+
+def fechar_tela_no_pc():
+    """Fecha a janela do navegador aberta SOBRE a /tela (usa o profile dedicado
+    _tela_profile, então nunca encosta no Chrome normal do Átila). Chamado ao parar
+    o Fooocus (manual ou auto-desligamento) — a tela não fica órfã mostrando 'aguardando'."""
+    try:
+        ps = (
+            "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='msedge.exe'\" "
+            "| Where-Object { $_.CommandLine -like '*_tela_profile*' } "
+            "| Select-Object -ExpandProperty ProcessId"
+        )
+        r = subprocess.run(
+            ['powershell', '-WindowStyle', 'Hidden', '-Command', ps],
+            capture_output=True, text=True, creationflags=CREATE_NO_WINDOW,
+        )
+        pids = [p.strip() for p in r.stdout.splitlines() if p.strip().isdigit()]
+        for pid in pids:
+            subprocess.run(['taskkill', '/F', '/T', '/PID', pid],
+                           capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+        if pids:
+            log.info(f'Tela do PC fechada (PIDs {pids})')
+    except Exception as e:
+        log.warning(f'Falha ao fechar a tela do PC: {e}')
+
+
+# ── auto-desligamento por inatividade ───────────────────────────────────────────
+# Pergunta do Átila: fechar o Fooocus sozinho após 5 min "sem uso". "Uso" = geração
+# em curso OU a página /controle do celular aberta (ela manda heartbeat). A /tela
+# (TV) NÃO conta — se ela ficar sozinha aberta e o celular for embora, desliga mesmo.
+INATIVIDADE_LIMITE = 300  # segundos (5 min)
+
+def _watch_inatividade():
+    import json as _json
+    while True:
+        time.sleep(30)
+        try:
+            if not fooocus_alive():
+                continue
+            req = urllib.request.Request('http://127.0.0.1:7860/cr/idle', method='GET')
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                d = _json.loads(resp.read().decode('utf-8', 'ignore'))
+            if not d.get('gerando') and int(d.get('idle', 0)) >= INATIVIDADE_LIMITE:
+                log.info(f"Auto-desligando Fooocus — {d.get('idle')}s sem uso (limite {INATIVIDADE_LIMITE}s)")
+                stop_fooocus()  # já fecha a /tela junto
+        except Exception as e:
+            # Fooocus rodando versão antiga sem /cr/idle, ou rede: fail-safe = NÃO desliga
+            log.debug(f'watch_inatividade: {e}')
 
 
 # ── PWA manifest ───────────────────────────────────────────────────────────────
@@ -337,7 +388,6 @@ body{
   <button class="btn btn-stop"  id="bStop"  onclick="doStop()">Parar</button>
   <a class="btn btn-open" id="bOpen" href="FOOOCUS_URL" target="_blank">Abrir interface →</a>
   <a class="btn btn-open" id="bCtrl" href="FOOOCUS_URL/controle" target="_blank" onclick="return abrirControleRemoto(event)">🎛️ Controle remoto (celular)</a>
-  <a class="btn btn-open" id="bTela" href="FOOOCUS_URL/tela" target="_blank">🖼️ Tela cheia (PC/TV)</a>
   <button class="btn btn-logs" onclick="openLogs()">Ver logs do servidor</button>
   <button class="btn btn-logs" onclick="openFooocusLog()">Ver log detalhado do Fooocus</button>
 </div>
@@ -360,7 +410,6 @@ const bStart= document.getElementById('bStart');
 const bStop = document.getElementById('bStop');
 const bOpen = document.getElementById('bOpen');
 const bCtrl = document.getElementById('bCtrl');
-const bTela = document.getElementById('bTela');
 const toast = document.getElementById('toast');
 
 let pollTimer = null;
@@ -395,7 +444,7 @@ function render(s) {
 function lock(start,stop,open){
   bStart.disabled=!start;
   bStop.disabled=!stop;
-  [bOpen,bCtrl,bTela].forEach(b=>{b.style.pointerEvents=open?'auto':'none';b.style.opacity=open?'1':'0.28';});
+  [bOpen,bCtrl].forEach(b=>{b.style.pointerEvents=open?'auto':'none';b.style.opacity=open?'1':'0.28';});
 }
 
 function startElapsed(label){
@@ -512,6 +561,10 @@ setInterval(async()=>{if(pollTimer)return;render(await fetchStatus());},6000);
 document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible') fetchStatus().then(render);
 });
+
+// impede sair por engano (toque no "voltar" fecha o Chrome e perde tudo).
+// O navegador mostra "Sair do site?" — confirmacao antes de fechar/voltar.
+window.addEventListener('beforeunload',e=>{e.preventDefault();e.returnValue='';});
 </script>
 </body>
 </html>
@@ -585,6 +638,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    threading.Thread(target=_watch_inatividade, daemon=True).start()
+    log.info(f'Watchdog de inatividade ligado (limite {INATIVIDADE_LIMITE}s)')
     server = HTTPServer(('0.0.0.0', PORT), Handler)
     log.info(f'Ouvindo em 0.0.0.0:{PORT}')
     try:
