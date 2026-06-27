@@ -455,14 +455,42 @@ async def _ep_heartbeat(request: Request):
     return JSONResponse({"ok": True})
 
 
+def _mtime(p):
+    try:
+        return Path(p).stat().st_mtime if p else 0.0
+    except Exception:
+        return 0.0
+
+
+def _atividade_visual_fooocus():
+    """Atividade REAL de geracao por QUALQUER caminho — inclusive a interface NATIVA
+    do Gradio, nao so o /cr/gerar do controle remoto. O async_worker (mesma pipeline
+    pros dois) atualiza shared.state['last_image'] (async_worker.py ~344) e grava o
+    preview em temp_preview_path (~205); o mtime mais recente entre eles marca quando
+    o Fooocus gerou por ultimo. Sem isso, gerar pela interface nativa NAO zerava o
+    timer e o watchdog matava o Fooocus em pleno uso -> 'connection lost' no celular,
+    so resolvido reiniciando. (add-on Atila/Claude, 27/06/2026)"""
+    li = shared.state.get("last_image") if isinstance(shared.state, dict) else None
+    pv = path_manager.model_paths.get("temp_preview_path")
+    return max(_mtime(li), _mtime(pv))
+
+
 async def _ep_idle(request: Request):
     global _generating
-    ger = bool(_generating)
-    if ger and isinstance(shared.state, dict):
+    now = time.time()
+    pv_mtime = _mtime(path_manager.model_paths.get("temp_preview_path"))
+    # idle conta desde a ultima atividade REAL: heartbeat/gerar/parar do controle remoto
+    # OU atividade visual do Fooocus (preview/imagem nova) — esta ultima pega a interface
+    # nativa do Gradio tambem. Gerar uma imagem (qualquer interface) reinicia a janela.
+    last = max(_last_activity, _atividade_visual_fooocus())
+    idle = max(0, int(now - last))
+    # gerando = nossa flag OU o preview foi atualizado nos ultimos 25s (geracao em curso
+    # por qualquer interface). Enquanto gerando, o watchdog do launcher nunca desliga.
+    ger = bool(_generating) or (now - pv_mtime) < 25
+    if _generating and isinstance(shared.state, dict):
         cur = shared.state.get("last_image")
         if cur and cur != _gen_start_image:
-            ger = False
-    idle = max(0, int(time.time() - _last_activity))
+            ger = (now - pv_mtime) < 25
     return JSONResponse({"idle": idle, "gerando": ger})
 
 
